@@ -1,6 +1,6 @@
 # Tennis Booking Bot
 
-Automated tennis court booking for ATSOM courts via Activity Messenger.
+Automated tennis court booking via Activity Messenger platform.
 
 ## About
 
