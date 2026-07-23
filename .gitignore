@@ -1,0 +1,33 @@
+# Credentials & sessions — never commit these
+auth.json
+auth_*.json
+token.json
+email_config.py
+calendar_credentials.json
+credentials*.json
+client_secret*.json
+local_config.py
+
+# Debug/scratch output
+debug_out.txt
+
+# Claude Code internals
+.claude/
+
+# Screenshots generated on each run
+*.png
+
+# Logs
+booking.log
+opening_time_probe.log
+
+# Booking history & probe output
+booking_history.csv
+opening_time_log.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/

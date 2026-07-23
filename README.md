@@ -1,0 +1,143 @@
+# Tennis Booking Bot
+
+Automated tennis court booking for ATSOM courts via Activity Messenger.
+
+## About
+
+This bot books a one-hour outdoor tennis slot every weekday night, targeting a court
+8 days in advance. It navigates the Activity Messenger booking site with Playwright,
+cycling through a priority list of courts and time slots until one is successfully
+reserved. On completion it sends a Gmail notification and adds a Google Calendar event;
+on failure, it emails an alert so you can book manually.
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12
+- [Playwright](https://playwright.dev/python/) with Chromium
+- A Gmail account with an App Password enabled
+- A logged-in Activity Messenger session saved to `auth.json`
+
+### Installation
+
+```bash
+pip install playwright openpyxl google-auth google-auth-oauthlib google-api-python-client
+playwright install chromium
+```
+
+### Required Setup
+
+**1. Save your session (`auth.json`)**
+
+`auth.json` stores your Activity Messenger login session so the bot can book without
+re-entering credentials each night. Run the helper script and log in manually within
+the 3-minute window:
+
+```bash
+python save_auth.py
+```
+
+A browser opens to `activitymessenger.com`. Log in, then wait — `auth.json` is saved
+automatically when the timer expires.
+
+> The session will eventually expire. When `book_tennis.py` detects an expired session
+> it skips the booking attempt and emails an alert. Re-run `save_auth.py` to refresh it.
+
+**2. Create `email_config.py`**
+
+```python
+GMAIL_APP_PASSWORD = "YOUR_16_CHAR_APP_PASSWORD"
+```
+
+Generate an App Password in your Google Account under
+**Security → 2-Step Verification → App passwords**. This file is excluded from version
+control via `.gitignore`.
+
+## Usage
+
+### Scheduled (recommended)
+
+`book_tennis.py` runs Sunday–Thursday at 9:30:30 PM via Windows Task Scheduler. The
+booking window for new slots opens at 9:30 PM each night; the script retries every
+30 seconds for up to 2 minutes if the window has not opened yet.
+
+Each run targets the date 8 days from today (the same weekday the following week), then:
+
+1. Verifies the `auth.json` session is still valid.
+2. Clears any stale items from the cart.
+3. Checks whether the booking window is open using the first priority slot as a sentinel.
+4. Works through the priority list until a slot is booked or all options are exhausted.
+5. Sends a Gmail notification and (on success) creates a Google Calendar event.
+
+### Manual run
+
+```bash
+python book_tennis.py
+```
+
+Output is logged to both stdout and `booking.log`. Each outcome is also appended to
+`booking_history.csv`.
+
+### Probe script
+
+`find_opening_time.py` is a standalone utility that probes the Jacques Viger 11 AM slot
+starting at 9:30:30 PM, retrying every 3 minutes for up to 11 attempts, to determine
+exactly when the booking window opens. Results are written to `opening_time_log.xlsx`
+and emailed when probing finishes.
+
+```bash
+python find_opening_time.py
+```
+
+## Configuration
+
+All configuration lives at the top of `book_tennis.py`.
+
+**Court priority** — edit `BOOKING_PRIORITY` to change the order courts are tried.
+The first available slot in the list wins.
+
+```python
+BOOKING_PRIORITY = [
+    ("Jacques Viger",   "2592", "11:00:00"),
+    ("Jacques Viger",   "2592", "10:00:00"),
+    ("Jacques Viger",   "2592", "12:00:00"),
+    ("Roland Proulx",   "2590", "11:00:00"),
+    ("Roland Proulx",   "2590", "10:00:00"),
+    ("Roland Proulx",   "2590", "12:00:00"),
+    ("De la Vérendrye", "2434", "11:00:00"),
+]
+```
+
+**Days ahead** — `DAYS_AHEAD = 8` targets a date 8 days from today. With nightly
+Sunday–Thursday runs this always lands on the same weekday the following week.
+
+**Retry window** — `RETRY_INTERVAL_SECS = 30` and `RETRY_TOTAL_SECS = 120` control
+how long the script waits for the booking window to open before giving up.
+
+**Email** — set `GMAIL_ADDRESS` in `local_config.py` (gitignored) to your Gmail address.
+The app password goes in `email_config.py` (gitignored).
+
+**Accounts / known players** — `ACCOUNTS`, `KNOWN_PLAYERS`, and `SHEET_SPREADSHEET_ID`
+live in `local_config.py` (gitignored, create manually) rather than `book_tennis.py`,
+since they contain real names/emails. See `book_tennis.py`'s comments for the expected
+shape.
+
+**Test mode** — set `TEST_MODE = True` and provide a `TEST_BOOK_AT` value to run
+against a specific slot without waiting for the booking window to open.
+
+## Project Structure
+
+```
+tennis-booking/
+├── book_tennis.py          # Main booking script (run nightly by Task Scheduler)
+├── find_opening_time.py    # Probe script: determines when the booking window opens
+├── save_auth.py            # One-time helper to capture and save a logged-in session
+├── email_config.py         # Gmail App Password (gitignored — create manually)
+├── local_config.py         # Real names/emails: ACCOUNTS, KNOWN_PLAYERS, SHEET_SPREADSHEET_ID (gitignored — create manually)
+├── auth.json               # Playwright session state (gitignored — generated by save_auth.py)
+├── token.json              # Google Calendar OAuth token (gitignored)
+├── booking.log             # Rolling log of all booking attempts
+├── booking_history.csv     # Structured record of each outcome (date, court, status)
+└── opening_time_log.xlsx   # Probe results from find_opening_time.py
+```
