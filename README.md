@@ -126,6 +126,31 @@ shape.
 **Test mode** — set `TEST_MODE = True` and provide a `TEST_BOOK_AT` value to run
 against a specific slot without waiting for the booking window to open.
 
+### Google Sheet config (optional, per-account overrides from your phone)
+
+Any account with a `sheet_tab` set in its `ACCOUNTS` entry can be steered from a
+Google Sheet instead of editing code — handy for a one-off change from your phone
+(e.g. "book at 10 AM this week" or "swap in a different partner"), without touching
+`book_tennis.py`. Accounts without `sheet_tab` never read the Sheet and always run
+with their hardcoded defaults.
+
+Each account's tab is a simple key/value table (range `A2:B`):
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Must be exactly `TRUE` for the Sheet to apply at all this run. Anything else (including blank) **skips that account's booking for the night** — this is a deliberate off-switch, not a fail-open default. |
+| `date_mode` | `auto` (default) or `manual`. Only gates `target_date` (below); has no effect on `target_time`/`player_2`. |
+| `target_date` | Only read in `manual` mode, and must exactly equal `today + DAYS_AHEAD` — a sanity check, not a way to book a different day. Matching it also bypasses that account's weekday gate for this one run. |
+| `target_time` | Optional override applied every run regardless of `date_mode`. Accepts `H:MM`/`HH:MM`/`HH:MM:SS`, validated against `TIME_SLOTS`. **Does not auto-expire** — blank the cell once a one-off override is no longer needed, or it keeps applying. |
+| `player_2` | Optional override, same "applies every run, doesn't auto-clear" caveat. Must be a name from `KNOWN_PLAYERS` (in `local_config.py`), matched case-insensitively. |
+
+If the Sheet can't be read for any reason (network, auth, missing tab, malformed
+row), the account books exactly as it would with no Sheet at all — this is purely
+additive and never blocks a run. Any present-but-invalid value (bad date, unrecognized
+time, unknown player) aborts that account's booking for the night and emails the raw
+Sheet contents plus which field failed. Success emails note `Source: sheet` or
+`Source: default` depending on whether an override was applied.
+
 ## Project Structure
 
 ```
