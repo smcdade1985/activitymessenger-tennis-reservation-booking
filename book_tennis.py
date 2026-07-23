@@ -63,7 +63,7 @@ DAYS_AHEAD          = 8      # today + 8 → one week out, next day (Tue→Wed, 
 RETRY_INTERVAL_SECS = 30     # wait between retry rounds if no slot found
 RETRY_TOTAL_SECS    = 600    # give up after 10 minutes total
 
-# One entry per ATSOM login the script books for. Accounts run concurrently
+# One entry per login the script books for. Accounts run concurrently
 # each night. To onboard a new account:
 #   1. python save_auth.py auth_<label>.json   (log in as that person, 3 min window)
 #   2. Append a dict below with their details.
@@ -682,7 +682,7 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
 async def run_account(browser, account, target_date):
     """
     Run the full sentinel-wait + priority-sweep booking flow for a single
-    ATSOM account, in its own browser context, then send that account's
+    account, in its own browser context, then send that account's
     owner their email confirmation and calendar invite.
     """
     label        = account["label"]

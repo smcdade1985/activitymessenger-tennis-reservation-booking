@@ -10,7 +10,7 @@ async def main():
             "https://activitymessenger.com/org/4866/package/2590?d=2026-06-20&v=7d&p=availability",
             wait_until="networkidle"
         )
-        await page.screenshot(path="roland_proulx_calendar.png", full_page=True)
+        await page.screenshot(path="court_2590_calendar.png", full_page=True)
         text = await page.evaluate("() => document.body.innerText")
         for line in text.split("\n"):
             line = line.strip()

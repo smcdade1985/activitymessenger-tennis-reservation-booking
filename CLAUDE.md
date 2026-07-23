@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A nightly Playwright bot that books ATSOM tennis courts on Activity Messenger. It runs via Windows Task Scheduler at 9:30:30 PM Sun–Fri (Friday was added so Patrick's account can target a Saturday-morning slot) and targets a slot 8 days out. `book_tennis.py` is the only production script; everything else is a one-time setup helper or exploration artifact.
+A nightly Playwright bot that books tennis courts on Activity Messenger. It runs via Windows Task Scheduler at 9:30:30 PM Sun–Fri (Friday was added so Patrick's account can target a Saturday-morning slot) and targets a slot 8 days out. `book_tennis.py` is the only production script; everything else is a one-time setup helper or exploration artifact.
 
 ## Running the script
 
@@ -50,7 +50,7 @@ Each account's `auth_*.json` expires periodically; the script detects this per-a
 
 Each `run_account()` call runs one retry loop, one round at a time:
 
-**Each round walks the entire priority list in order**, moving to the next court/time immediately the moment one comes back without a `Réserver` button — no single court ever monopolizes the retry budget. A missing `Réserver` only proves that specific slot isn't open right now (today's window may not have opened yet, or that court may just not carry that hour at all on this day of the week) — it does not mean no other option in the list is bookable. This matters most for accounts whose priority list mixes courts with genuinely different per-day offerings (e.g. Patrick's Saturday list tries 9 AM at all three courts, but Jacques Viger/Roland Proulx don't carry a 9 AM slot on Saturdays at all while De la Vérendrye does — checking JV alone for the full retry window used to cause the whole run to give up without ever trying DLV).
+**Each round walks the entire priority list in order**, moving to the next court/time immediately the moment one comes back without a `Réserver` button — no single court ever monopolizes the retry budget. A missing `Réserver` only proves that specific slot isn't open right now (today's window may not have opened yet, or that court may just not carry that hour at all on this day of the week) — it does not mean no other option in the list is bookable. This matters most for accounts whose priority list mixes courts with genuinely different per-day offerings (e.g. Patrick's Saturday list tries 9 AM at all three courts, but JV/RP don't carry a 9 AM slot on Saturdays at all while DLV does — checking JV alone for the full retry window used to cause the whole run to give up without ever trying DLV).
 
 **End of round:** if anything booked, done. If any option in the round came back open-but-taken, the window is confirmed open — the round finishes sweeping whatever's left in the list, then the whole attempt stops (no further rounds). Only when an entire round comes back completely empty (every option, no response at all) does the script sleep `RETRY_INTERVAL_SECS` and try the full list again, up to `RETRY_TOTAL_SECS` total.
 
@@ -65,7 +65,7 @@ Since accounts run concurrently, all `log()` lines, screenshot filenames, and `b
 - `BOOKING_PRIORITY` — ordered list of `(court_name, package_id, hour_str)` tuples, shared by every account. Every `hour_str` must exist as a key in `TIME_SLOTS` or the script aborts at startup.
 - `TIME_SLOTS` — maps `"HH:MM:SS"` to `("start label", "end label")` display strings. Covers every hourly slot the platform actually offers (07:00–21:00), not just the subset `BOOKING_PRIORITY` tries by default — this is what bounds valid `target_time` values from the Sheet config below.
 - `DAYS_AHEAD` — days ahead to book (default 8).
-- `ACCOUNTS` — one dict per ATSOM login the script books for, all run in parallel each night:
+- `ACCOUNTS` — one dict per login the script books for, all run in parallel each night:
   - `label` — short slug used in logs, screenshot filenames, and CSV notes.
   - `display_name` — name `check_session_valid` looks for on the logged-in homepage.
   - `auth_file` — that account's Playwright storage-state file.
@@ -97,8 +97,8 @@ Each account can optionally be controlled from a phone via a Google Sheet, witho
 
 | Court | Package ID |
 |-------|-----------|
-| Jacques Viger | 2592 |
-| Roland Proulx | 2590 |
-| De la Vérendrye | 2434 |
+| JV | 2592 |
+| RP | 2590 |
+| DLV | 2434 |
 
 Booking URL pattern: `https://activitymessenger.com/org/4866/package/{package_id}?d={date}&v=7d&p=availability&book_at={encoded_datetime}`

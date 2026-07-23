@@ -81,7 +81,7 @@ Output is logged to both stdout and `booking.log`. Each outcome is also appended
 
 ### Probe script
 
-`find_opening_time.py` is a standalone utility that probes the Jacques Viger 11 AM slot
+`find_opening_time.py` is a standalone utility that probes a single court's 11 AM slot
 starting at 9:30:30 PM, retrying every 3 minutes for up to 11 attempts, to determine
 exactly when the booking window opens. Results are written to `opening_time_log.xlsx`
 and emailed when probing finishes.
@@ -99,13 +99,13 @@ The first available slot in the list wins.
 
 ```python
 BOOKING_PRIORITY = [
-    ("Jacques Viger",   "2592", "11:00:00"),
-    ("Jacques Viger",   "2592", "10:00:00"),
-    ("Jacques Viger",   "2592", "12:00:00"),
-    ("Roland Proulx",   "2590", "11:00:00"),
-    ("Roland Proulx",   "2590", "10:00:00"),
-    ("Roland Proulx",   "2590", "12:00:00"),
-    ("De la Vérendrye", "2434", "11:00:00"),
+    ("JV",  "2592", "11:00:00"),
+    ("JV",  "2592", "10:00:00"),
+    ("JV",  "2592", "12:00:00"),
+    ("RP",  "2590", "11:00:00"),
+    ("RP",  "2590", "10:00:00"),
+    ("RP",  "2590", "12:00:00"),
+    ("DLV", "2434", "11:00:00"),
 ]
 ```
 
