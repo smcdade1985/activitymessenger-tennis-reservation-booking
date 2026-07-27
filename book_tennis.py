@@ -479,7 +479,11 @@ async def select_second_player(page, email, account_label="sean"):
       2. Click "Choisir une personne ▼" → contact dropdown lists saved players
       3. Click the entry matching email → form auto-fills
       4. Click "Sauvegarder" → player saved, modal closes
-    Returns True on success, False on failure.
+    Returns (ok, reason): reason is None on success, else a short machine-
+    readable code plus a human-readable detail, e.g.
+    "no_contact_match: no dropdown entry contains 'x@y.com' — check
+    KNOWN_PLAYERS/weekday_players against the account's actual saved
+    contacts (site-side typos happen — see contacts list logged above)".
     """
     prefix = f"  [{account_label}] "
 
@@ -493,12 +497,13 @@ async def select_second_player(page, email, account_label="sean"):
         await page.screenshot(path=f"{account_label}_player_01_modal.png", full_page=True)
     except Exception as e:
         log(f"{prefix}ERROR: 'Choisir un joueur' not visible after 8 s: {e}")
-        return False
+        return False, "modal_not_found: 'Choisir un joueur' button never appeared"
 
     # 2. Open the saved-contacts dropdown
     choisir_personne = page.locator(
         "a:has-text('Choisir une personne'), button:has-text('Choisir une personne')"
     ).first
+    dropdown_contacts = []
     try:
         await choisir_personne.wait_for(state="visible", timeout=5_000)
         log(f"{prefix}'Choisir une personne' dropdown found — clicking…")
@@ -507,16 +512,15 @@ async def select_second_player(page, email, account_label="sean"):
         await page.screenshot(path=f"{account_label}_player_02_dropdown.png", full_page=True)
 
         all_li = await page.query_selector_all("li, [role=option], .dropdown-item")
-        visible_li = []
         for li in all_li:
             if await li.is_visible():
                 t = (await li.inner_text()).strip().replace("\n", " ")
                 if t:
-                    visible_li.append(t[:100])
-        log(f"{prefix}Dropdown contacts: {visible_li}")
+                    dropdown_contacts.append(t[:100])
+        log(f"{prefix}Dropdown contacts: {dropdown_contacts}")
     except Exception as e:
         log(f"{prefix}ERROR: 'Choisir une personne' not found: {e}")
-        return False
+        return False, "dropdown_not_found: 'Choisir une personne' control never appeared"
 
     # 3. Click the contact entry matching the target email
     entry = page.locator("li, [role=option], .dropdown-item, a").filter(has_text=email).first
@@ -530,7 +534,11 @@ async def select_second_player(page, email, account_label="sean"):
     except Exception as e:
         log(f"{prefix}ERROR: No contact matching '{email}' in dropdown: {e}")
         await page.screenshot(path=f"{account_label}_player_03_error.png", full_page=True)
-        return False
+        return False, (
+            f"no_contact_match: no dropdown entry contains '{email}' — saved contacts were "
+            f"{dropdown_contacts}. Check KNOWN_PLAYERS/weekday_players against the account's "
+            f"actual saved contact email (site-side typos happen)."
+        )
 
     # 4. Save the selection
     sauvegarder = page.locator("button:has-text('Sauvegarder')").first
@@ -545,9 +553,9 @@ async def select_second_player(page, email, account_label="sean"):
     except Exception as e:
         log(f"{prefix}ERROR: 'Sauvegarder' not found: {e}")
         await page.screenshot(path=f"{account_label}_player_04_error.png", full_page=True)
-        return False
+        return False, "save_failed: 'Sauvegarder' button never appeared after selecting contact"
 
-    return True
+    return True, None
 
 
 # ── Per-court booking attempt ────────────────────────────────────────────────
@@ -556,11 +564,17 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
                           second_player_email, account_label="sean"):
     """
     Attempt to book the slot at the given court/time (encoded in book_at_enc).
-    Returns (booked, court_number, slot_open):
+    Returns (booked, court_number, slot_open, fail_reason):
       - booked     : True if the booking completed successfully.
       - court_number: court number string from confirmation page, or None.
       - slot_open  : True if the booking window is open (Réserver button found),
                      False if the window is not yet open (no Réserver button).
+      - fail_reason: None on success. Otherwise a short machine-readable code
+                     ("taken", "payment_required", "player_select_failed: ...",
+                     etc.) distinguishing *why* it failed — genuine contention
+                     ("taken") vs. a config/site bug that needs fixing, so
+                     failure emails/CSV notes don't collapse everything into
+                     a misleading "not available".
     """
     tag = f"{account_label}/{court_name}"
     shot_prefix = f"{account_label}_{package_id}"
@@ -584,7 +598,7 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
     except Exception:
         log(f"  [{tag}] 'Réserver' not found — booking window not yet open.")
         await page.screenshot(path=f"{shot_prefix}_no_reserver.png", full_page=True)
-        return False, None, False
+        return False, None, False, "not_offered"
 
     await reserver.click()
     await page.wait_for_load_state("networkidle")
@@ -600,15 +614,15 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
     except Exception:
         log(f"  [{tag}] Réserver rejected (slot unavailable or error).")
         await log_page_text(page, f"{tag}-reserver-rejected")
-        return False, None, True
+        return False, None, True, "taken"
 
     # ── 3. Select second player ───────────────────────────────────────────
     log(f"  [{tag}] Selecting second player…")
-    player_ok = await select_second_player(page, second_player_email, account_label)
+    player_ok, player_fail_reason = await select_second_player(page, second_player_email, account_label)
     if not player_ok:
-        log(f"  [{tag}] Player selection failed — clearing cart and giving up on this court.")
+        log(f"  [{tag}] Player selection failed ({player_fail_reason}) — clearing cart and giving up on this court.")
         await clear_cart(page)
-        return False, None, True
+        return False, None, True, f"player_select_failed: {player_fail_reason}"
 
     # ── 4. Caisse de sortie ───────────────────────────────────────────────
     await asyncio.sleep(2)
@@ -625,7 +639,7 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
         await log_page_text(page, f"{tag} after-caisse")
     except Exception as e:
         log(f"  [{tag}] ERROR: 'Caisse de sortie' not found: {e}")
-        return False, None, True
+        return False, None, True, f"caisse_unavailable: {e}"
 
     # ── 5. Walk the checkout wizard to Confirmation ───────────────────────
     # Steps: Panier d'achats → Vos informations → Paiement → Confirmation
@@ -646,6 +660,19 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
         try:
             await nav_btn.wait_for(state="visible", timeout=5_000)
             btn_text = (await nav_btn.inner_text()).strip()
+
+            # A real (non-zero) charge is being requested — the bot has no
+            # card on file and must never blindly submit a blank card form.
+            # "Aucun paiement requis" is the site's own $0-due message; its
+            # absence on a payment step means real money is being asked for.
+            if "payer" in btn_text.lower():
+                page_text_now = await page.evaluate("() => document.body.innerText")
+                if "aucun paiement requis" not in page_text_now.lower():
+                    log(f"  [{tag}] Payment step requires a real charge (no 'Aucun paiement "
+                        f"requis') — refusing to submit a blank card form.")
+                    await page.screenshot(path=f"{shot_prefix}_payment_required.png", full_page=True)
+                    return False, None, True, "payment_required"
+
             log(f"  [{tag}] Clicking {btn_text!r}…")
             await nav_btn.click()
             await page.wait_for_load_state("networkidle")
@@ -659,14 +686,14 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
 
     if not wizard_complete:
         log(f"  [{tag}] ERROR: checkout wizard loop exhausted without completing — booking not confirmed.")
-        return False, None, True
+        return False, None, True, "wizard_incomplete"
 
     # Verify we actually reached a confirmation page and didn't land on an error.
     page_text = await page.evaluate("() => document.body.innerText")
     if "réservation est confirmée" not in page_text.lower():
         log(f"  [{tag}] WARNING: wizard ended but no confirmation text found — booking may have failed.")
         await page.screenshot(path=f"{shot_prefix}_no_confirmation.png", full_page=True)
-        return False, None, True
+        return False, None, True, "no_confirmation"
 
     court_number = await extract_court_number(page)
     if court_number:
@@ -674,7 +701,7 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
     else:
         log(f"  [{tag}] Could not extract a court number from confirmation page.")
 
-    return True, court_number, True
+    return True, court_number, True, None
 
 
 # ── Per-account run ──────────────────────────────────────────────────────────
@@ -843,7 +870,9 @@ async def run_account(browser, account, target_date):
         booked_start_label  = None
         booked_end_label    = None
         booked_hour_str     = None
-        failed_attempts     = []
+        failed_attempts     = []  # plain "Court Label" strings, any reason — used in the success-path "Tried first" note
+        blocked_attempts    = []  # (court, label, reason) for failures that are NOT plain contention — config/site bugs
+        payment_attempts    = []  # (court, label, url) for slots that are open but require a real manual card payment
         start_time          = datetime.now()
 
         sentinel_name, _, sentinel_hour = priority_list[0]
@@ -862,7 +891,7 @@ async def run_account(browser, account, target_date):
                     book_at_enc = quote(f"{target_date}T{hour_str}{get_tz_offset()}", safe="")
 
                 log(f"--- [{label}] Round {round_num}: attempting {court_name} {start_label} ---")
-                booked, court_number, slot_open = await try_book_court(
+                booked, court_number, slot_open, fail_reason = await try_book_court(
                     page, court_name, package_id, book_at_enc, target_date,
                     player_email, label,
                 )
@@ -878,7 +907,20 @@ async def run_account(browser, account, target_date):
                 if slot_open:
                     window_open_this_round = True
                     failed_attempts.append(f"{court_name} {start_label}")
-                    log(f"  [{label}] {court_name} {start_label}: not available — trying next option.")
+                    if fail_reason == "taken":
+                        log(f"  [{label}] {court_name} {start_label}: already taken — trying next option.")
+                    elif fail_reason == "payment_required":
+                        manual_url = (
+                            f"{BASE_URL}/org/4866/package/{package_id}"
+                            f"?d={target_date}&v=7d&p=availability&book_at={book_at_enc}"
+                        )
+                        payment_attempts.append((court_name, start_label, manual_url))
+                        log(f"  [{label}] {court_name} {start_label}: open but requires a real "
+                            f"manual card payment — skipping (not booked automatically).")
+                    else:
+                        blocked_attempts.append((court_name, start_label, fail_reason))
+                        log(f"  [{label}] {court_name} {start_label}: blocked by an error "
+                            f"({fail_reason}) — trying next option.")
                 else:
                     log(f"  [{label}] {court_name} {start_label}: no Réserver button — "
                         f"not offered at this time, trying next option.")
@@ -988,22 +1030,59 @@ async def run_account(browser, account, target_date):
                     account_label=label,
                 )
             else:
-                # Window opened but all priority slots were taken
+                # Window opened but nothing got booked. Distinguish *why*:
+                # genuine contention ("taken") vs. a config/site bug
+                # (blocked_attempts) vs. a real-money payment the bot won't
+                # submit unattended (payment_attempts) — collapsing these
+                # into one generic "all slots taken" message is exactly what
+                # buried the Jess-email-typo bug behind a false "unavailable"
+                # read, so each gets its own callout here.
                 tried = ", ".join(failed_attempts)
-                log(f"[{label}] BOOKING FAILED — window opened but all priority slots were taken.")
-                send_notification(
-                    subject=f"Tennis Booking ❌ All slots taken ({target_date})",
-                    body=(
+
+                if blocked_attempts:
+                    detail = "; ".join(f"{c} {t}: {r}" for c, t, r in blocked_attempts)
+                    log(f"[{label}] BOOKING FAILED — blocked by an error, not just unavailability: {detail}")
+                    subject = f"Tennis Booking ⚠️ Blocked by an error ({target_date})"
+                    body = (
+                        f"The booking window opened on {target_date}, but at least one option "
+                        f"failed for a reason that is NOT simple unavailability — this likely "
+                        f"needs a config or site fix, not just a retry:\n\n"
+                        f"{chr(10).join(f'  {c} {t}: {r}' for c, t, r in blocked_attempts)}\n\n"
+                        f"Tried (in order): {tried}\n\n"
+                        + (
+                            "Also open (but requiring a manual card payment the bot won't "
+                            "submit): " + "; ".join(f"{c} {t} — {u}" for c, t, u in payment_attempts) + "\n\n"
+                            if payment_attempts else ""
+                        )
+                        + "You may need to book manually."
+                    )
+                    csv_note = f"Window opened, blocked by error. {detail}. Tried: {tried}"
+                elif payment_attempts:
+                    detail = "; ".join(f"{c} {t} — {u}" for c, t, u in payment_attempts)
+                    log(f"[{label}] BOOKING FAILED — only a paid slot was open (requires manual payment): {detail}")
+                    subject = f"Tennis Booking 💳 Manual payment needed ({target_date})"
+                    body = (
+                        f"The booking window opened on {target_date}, but the only open slot(s) "
+                        f"required a real credit-card payment, which the bot never submits "
+                        f"automatically:\n\n{detail}\n\n"
+                        f"Tried (in order): {tried}\n\n"
+                        f"Book manually at the link(s) above if you still want it."
+                    )
+                    csv_note = f"Window opened, only paid slot(s) open. {detail}. Tried: {tried}"
+                else:
+                    log(f"[{label}] BOOKING FAILED — window opened but all priority slots were taken.")
+                    subject = f"Tennis Booking ❌ All slots taken ({target_date})"
+                    body = (
                         f"The booking window opened but every priority slot was already "
                         f"taken on {target_date}.\n\n"
                         f"Tried (in order): {tried}\n\n"
                         f"You may need to book manually."
-                    ),
-                    to_email=failure_recipients,
-                )
+                    )
+                    csv_note = f"Window opened, all slots taken. Tried: {tried}"
+
+                send_notification(subject=subject, body=body, to_email=failure_recipients)
                 log_booking_history(
-                    target_date, None, None, None, "fail",
-                    f"Window opened, all slots taken. Tried: {tried}",
+                    target_date, None, None, None, "fail", csv_note,
                     account_label=label,
                 )
     finally:
