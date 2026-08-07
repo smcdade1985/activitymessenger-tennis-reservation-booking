@@ -38,6 +38,7 @@ import re
 import sys
 import logging
 import smtplib
+import traceback
 from email.mime.text import MIMEText
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
@@ -62,6 +63,15 @@ BASE_URL            = "https://activitymessenger.com"
 DAYS_AHEAD          = 8      # today + 8 → one week out, next day (Tue→Wed, Wed→Thu …)
 RETRY_INTERVAL_SECS = 30     # wait between retry rounds if no slot found
 RETRY_TOTAL_SECS    = 600    # give up after 10 minutes total
+
+# Transient network resilience (dropped connections, slow DNS, momentary
+# server hiccups) — distinct from RETRY_INTERVAL_SECS/RETRY_TOTAL_SECS above,
+# which poll for the booking window to open. This is a short exponential
+# backoff applied to individual page loads so one flaky request doesn't crash
+# the whole account's run for the night. See with_network_retry() below.
+NAV_TIMEOUT_MS          = 30_000  # per-attempt navigation timeout (Playwright's own default)
+NETWORK_RETRY_ATTEMPTS  = 3
+NETWORK_RETRY_BASE_SECS = 2       # backoff: 2s, 4s, ... (2 * 2**(attempt-1))
 
 # One entry per login the script books for. Accounts run concurrently
 # each night. To onboard a new account:
@@ -438,15 +448,49 @@ async def extract_court_number(page):
     return match.group(1) if match else None
 
 
+# ── Network resilience ───────────────────────────────────────────────────────
+
+async def with_network_retry(coro_factory, tag, description, attempts=NETWORK_RETRY_ATTEMPTS):
+    """
+    Run an awaitable-producing callable with exponential backoff on failure.
+    coro_factory is a zero-arg callable (e.g. a lambda) rather than a bare
+    coroutine because a coroutine object can only be awaited once, and a
+    retry needs a fresh one per attempt. Re-raises the last error once
+    attempts are exhausted — callers/run_account's catch-all is what turns
+    that into a logged, emailed failure instead of a silent crash.
+    """
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            last_err = e
+            if attempt == attempts:
+                break
+            backoff = NETWORK_RETRY_BASE_SECS * (2 ** (attempt - 1))
+            log(f"  [{tag}] {description} failed (attempt {attempt}/{attempts}): {e!r}. "
+                f"Retrying in {backoff:.0f}s…")
+            await asyncio.sleep(backoff)
+    raise last_err
+
+
 # ── Session check ────────────────────────────────────────────────────────────
 
-async def check_session_valid(page, display_name):
+async def check_session_valid(page, display_name, tag="session"):
     """
     Navigate to the logged-in homepage and look for the account name to
     confirm the session is still authenticated. Returns True if logged in,
     False if the session has expired.
+
+    A navigation failure (network blip, DNS hiccup) is retried with backoff
+    and, if still failing after that, propagates as an exception — this is
+    deliberately distinct from returning False, since "the site was
+    unreachable" and "the login expired" need different alerts/fixes.
     """
-    await page.goto(f"{BASE_URL}/org/4866/client", wait_until="networkidle")
+    await with_network_retry(
+        lambda: page.goto(f"{BASE_URL}/org/4866/client", wait_until="networkidle", timeout=NAV_TIMEOUT_MS),
+        tag, "Session-check navigation",
+    )
     account_marker = page.locator(f"text={display_name}").first
     try:
         await account_marker.wait_for(state="visible", timeout=5_000)
@@ -457,8 +501,11 @@ async def check_session_valid(page, display_name):
 
 # ── Cart helpers ─────────────────────────────────────────────────────────────
 
-async def clear_cart(page):
-    await page.goto(f"{BASE_URL}/org/4866/checkout", wait_until="networkidle")
+async def clear_cart(page, tag="cart"):
+    await with_network_retry(
+        lambda: page.goto(f"{BASE_URL}/org/4866/checkout", wait_until="networkidle", timeout=NAV_TIMEOUT_MS),
+        tag, "Cart-page navigation",
+    )
     vider = page.locator("button:has-text('Vider le panier')").first
     try:
         await vider.wait_for(state="visible", timeout=3_000)
@@ -586,7 +633,10 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
     log(f"  [{tag}] URL: {url}")
 
     # ── 1. Load the booking panel ─────────────────────────────────────────
-    await page.goto(url, wait_until="networkidle")
+    await with_network_retry(
+        lambda: page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT_MS),
+        tag, "Court-page navigation",
+    )
     await page.screenshot(path=f"{shot_prefix}_step1_loaded.png", full_page=True)
     await log_visible_buttons(page, f"{tag} step1")
 
@@ -621,7 +671,7 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
     player_ok, player_fail_reason = await select_second_player(page, second_player_email, account_label)
     if not player_ok:
         log(f"  [{tag}] Player selection failed ({player_fail_reason}) — clearing cart and giving up on this court.")
-        await clear_cart(page)
+        await clear_cart(page, tag)
         return False, None, True, f"player_select_failed: {player_fail_reason}"
 
     # ── 4. Caisse de sortie ───────────────────────────────────────────────
@@ -830,7 +880,7 @@ async def run_account(browser, account, target_date):
     try:
         # Verify the saved session is still a valid, logged-in session
         log(f"--- [{label}] Step 0: verifying {auth_file} session ---")
-        if not await check_session_valid(page, account["display_name"]):
+        if not await check_session_valid(page, account["display_name"], label):
             log(f"[{label}] Session expired — {auth_file} is no longer authenticated. Skipping booking attempt.")
             send_notification(
                 subject="Tennis Booking ⚠️ Session Expired",
@@ -851,7 +901,7 @@ async def run_account(browser, account, target_date):
 
         # Clear any stale cart before starting
         log(f"--- [{label}] Step 1: clearing stale cart ---")
-        await clear_cart(page)
+        await clear_cart(page, label)
 
         # Each round walks the ENTIRE priority list in order, immediately
         # moving to the next court/time the moment one comes back without a
@@ -924,7 +974,7 @@ async def run_account(browser, account, target_date):
                 else:
                     log(f"  [{label}] {court_name} {start_label}: no Réserver button — "
                         f"not offered at this time, trying next option.")
-                await clear_cart(page)
+                await clear_cart(page, label)
 
             if booked_court:
                 break
@@ -1085,6 +1135,30 @@ async def run_account(browser, account, target_date):
                     target_date, None, None, None, "fail", csv_note,
                     account_label=label,
                 )
+    except Exception as e:
+        # Catch-all for anything not already handled above (a site layout
+        # change, a Playwright error, a network failure that survived
+        # with_network_retry's backoff, etc.) — without this, an unexpected
+        # exception here is only caught by main()'s generic
+        # return_exceptions=True and logged as "UNHANDLED ERROR", with no
+        # email and no booking_history row, so a real problem looks
+        # identical to the script simply not having run.
+        log(f"[{label}] UNEXPECTED ERROR: {e!r}\n{traceback.format_exc()}")
+        send_notification(
+            subject=f"Tennis Booking ⚠️ Unexpected error ({target_date})",
+            body=(
+                f"The booking attempt for {account['display_name']} crashed before finishing "
+                f"— this is distinct from 'all slots taken' or 'session expired', it means "
+                f"something broke mid-run (likely a network issue or a site change):\n\n"
+                f"{e!r}\n\n"
+                f"Check booking.log on the machine for the full traceback."
+            ),
+            to_email=failure_recipients,
+        )
+        log_booking_history(
+            target_date, None, None, None, "fail",
+            f"Unexpected error: {e!r}", account_label=label,
+        )
     finally:
         await context.close()
 
