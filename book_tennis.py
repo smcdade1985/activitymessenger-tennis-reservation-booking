@@ -196,9 +196,16 @@ TEST_BOOK_AT = ""
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def get_tz_offset():
-    """Return Montreal's current UTC offset, e.g. '-0400' (EDT) or '-0500' (EST)."""
-    return datetime.now(ZoneInfo("America/Montreal")).strftime("%z")
+def get_tz_offset(target_date, hour_str):
+    """
+    Return Montreal's UTC offset for the given target date/time, e.g. '-0400'
+    (EDT) or '-0500' (EST). Must be computed relative to target_date (not
+    "now") — DAYS_AHEAD means target_date can fall on the other side of a DST
+    transition from today, and the offset that's actually correct "now" would
+    then be wrong for the booked date.
+    """
+    dt = datetime.strptime(f"{target_date}T{hour_str}", "%Y-%m-%dT%H:%M:%S")
+    return dt.replace(tzinfo=ZoneInfo("America/Montreal")).strftime("%z")
 
 
 # ── Email notification ───────────────────────────────────────────────────────
@@ -938,7 +945,7 @@ async def run_account(browser, account, target_date):
                 if TEST_MODE and TEST_BOOK_AT and round_num == 1 and idx == 0:
                     book_at_enc = TEST_BOOK_AT
                 else:
-                    book_at_enc = quote(f"{target_date}T{hour_str}{get_tz_offset()}", safe="")
+                    book_at_enc = quote(f"{target_date}T{hour_str}{get_tz_offset(target_date, hour_str)}", safe="")
 
                 log(f"--- [{label}] Round {round_num}: attempting {court_name} {start_label} ---")
                 booked, court_number, slot_open, fail_reason = await try_book_court(
