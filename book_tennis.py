@@ -34,15 +34,18 @@ Booking flow per court/time attempt:
 import asyncio
 import csv
 import os
+import random
 import re
 import sys
 import logging
 import smtplib
+import math
 import traceback
 from email.mime.text import MIMEText
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 from zoneinfo import ZoneInfo
 
 from local_config import GMAIL_ADDRESS, SHEET_SPREADSHEET_ID, KNOWN_PLAYERS, ACCOUNTS
@@ -58,6 +61,107 @@ logging.basicConfig(
     ],
 )
 log = logging.info
+
+# ── Realistic User-Agent rotation ──────────────────────────────────────────
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+]
+
+VIEWPORT_SIZES = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+]
+
+# ── Human-like behavior helpers ─────────────────────────────────────────────
+
+async def human_delay(min_ms=500, max_ms=2000):
+    """Pause for a random duration to simulate human thinking/reading time."""
+    await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
+
+async def human_type(page, selector, text):
+    """Type text character by character with random delays and occasional typos."""
+    locator = page.locator(selector).first
+    await locator.click()
+    await human_delay(200, 500)
+    for char in text:
+        await page.keyboard.type(char, delay=random.randint(50, 150))
+        if random.random() < 0.05:  # 5% chance of a typo
+            await page.keyboard.press("Backspace")
+            await human_delay(200, 400)
+            await page.keyboard.type(char, delay=random.randint(50, 150))
+
+async def human_mouse_move_bezier(page, target_x, target_y, duration_ms=1000):
+    """
+    Move mouse in a natural curved Bezier path with acceleration/deceleration.
+    This is the most realistic mouse movement pattern.
+    """
+    # Get current mouse position (default to 0,0 if not tracked)
+    start_x, start_y = await page.evaluate("() => [window.mouseX || 0, window.mouseY || 0]")
+    
+    # Create random control point for natural curve
+    control_x = start_x + random.uniform(-100, 100)
+    control_y = start_y + random.uniform(-100, 100)
+    
+    steps = random.randint(15, 30)
+    for i in range(steps + 1):
+        t = i / steps
+        # Quadratic Bezier curve formula
+        x = (1-t)**2 * start_x + 2*(1-t)*t*control_x + t**2 * target_x
+        y = (1-t)**2 * start_y + 2*(1-t)*t*control_y + t**2 * target_y
+        
+        # Add slight random jitter (humans aren't perfectly smooth)
+        x += random.uniform(-2, 2)
+        y += random.uniform(-2, 2)
+        
+        await page.mouse.move(x, y)
+        await asyncio.sleep(duration_ms / steps / 1000)
+
+async def human_click(page, locator_or_selector, **kwargs):
+    """
+    Move the mouse using Bezier curves to the element and click,
+    simulating realistic human cursor movement.
+    """
+    if isinstance(locator_or_selector, str):
+        locator = page.locator(locator_or_selector).first
+    else:
+        locator = locator_or_selector
+        
+    try:
+        await locator.wait_for(state="visible", timeout=kwargs.get('timeout', 5000))
+        box = await locator.bounding_box()
+        if box:
+            target_x = box['x'] + box['width']/2
+            target_y = box['y'] + box['height']/2
+            
+            # Use Bezier curve movement
+            await human_mouse_move_bezier(page, target_x, target_y, duration_ms=random.randint(800, 1500))
+            await human_delay(100, 300)
+            await locator.click(**kwargs)
+        else:
+            # Fallback if bounding box fails
+            await locator.click(**kwargs)
+    except Exception:
+        # Ultimate fallback
+        await locator.click(**kwargs)
+
+async def human_scroll_to_element(page, locator):
+    """
+    Scroll to element with natural pauses, overshoot, and correction.
+    Humans rarely scroll perfectly to the exact position on first try.
+    """
+    await locator.scroll_into_view_if_needed()
+    
+    # Add slight overshoot and correction (very human-like)
+    await page.mouse.wheel(0, random.randint(50, 150))
+    await human_delay(200, 400)
+    await page.mouse.wheel(0, random.randint(-20, -50))
+    await human_delay(100, 200)
+
+# ── End human-like behavior helpers ──────────────────────────────────────────
 
 BASE_URL            = "https://activitymessenger.com"
 DAYS_AHEAD          = 8      # today + 8 → one week out, next day (Tue→Wed, Wed→Thu …)
@@ -143,7 +247,7 @@ BOOKING_PRIORITY = [
     ("De la Vérendrye", "2434", "11:00:00"),
 ]
 
-# ── Optional Google Sheet config layer ──────────────────────────────────────
+# ─ Optional Google Sheet config layer ──────────────────────────────────────
 # Purely additive: an account only consults the Sheet if it sets "sheet_tab"
 # below. If the Sheet can't be read for ANY reason (network, auth, missing
 # tab, malformed rows), the account books exactly as it would with no Sheet
@@ -455,7 +559,7 @@ async def extract_court_number(page):
     return match.group(1) if match else None
 
 
-# ── Network resilience ───────────────────────────────────────────────────────
+# ─ Network resilience ───────────────────────────────────────────────────────
 
 async def with_network_retry(coro_factory, tag, description, attempts=NETWORK_RETRY_ATTEMPTS):
     """
@@ -517,7 +621,7 @@ async def clear_cart(page, tag="cart"):
     try:
         await vider.wait_for(state="visible", timeout=3_000)
         log("  Cart had items — emptying…")
-        await vider.click()
+        await human_click(page, vider)
         await page.wait_for_load_state("networkidle")
         log("  Cart emptied.")
     except Exception:
@@ -546,8 +650,8 @@ async def select_second_player(page, email, account_label="sean"):
     try:
         await choisir.wait_for(state="visible", timeout=8_000)
         log(f"{prefix}'Choisir un joueur' found — clicking…")
-        await choisir.click()
-        await asyncio.sleep(2)
+        await human_click(page, choisir)
+        await human_delay(1000, 2500)
         await page.screenshot(path=f"{account_label}_player_01_modal.png", full_page=True)
     except Exception as e:
         log(f"{prefix}ERROR: 'Choisir un joueur' not visible after 8 s: {e}")
@@ -561,8 +665,8 @@ async def select_second_player(page, email, account_label="sean"):
     try:
         await choisir_personne.wait_for(state="visible", timeout=5_000)
         log(f"{prefix}'Choisir une personne' dropdown found — clicking…")
-        await choisir_personne.click()
-        await asyncio.sleep(2)
+        await human_click(page, choisir_personne)
+        await human_delay(1000, 2500)
         await page.screenshot(path=f"{account_label}_player_02_dropdown.png", full_page=True)
 
         all_li = await page.query_selector_all("li, [role=option], .dropdown-item")
@@ -582,8 +686,8 @@ async def select_second_player(page, email, account_label="sean"):
         await entry.wait_for(state="visible", timeout=5_000)
         entry_text = (await entry.inner_text()).strip().replace("\n", " ")
         log(f"{prefix}Contact found: {entry_text!r} — clicking…")
-        await entry.click()
-        await asyncio.sleep(2)
+        await human_click(page, entry)
+        await human_delay(1000, 2500)
         await page.screenshot(path=f"{account_label}_player_03_selected.png", full_page=True)
     except Exception as e:
         log(f"{prefix}ERROR: No contact matching '{email}' in dropdown: {e}")
@@ -599,8 +703,8 @@ async def select_second_player(page, email, account_label="sean"):
     try:
         await sauvegarder.wait_for(state="visible", timeout=5_000)
         log(f"{prefix}'Sauvegarder' found — clicking…")
-        await sauvegarder.click()
-        await asyncio.sleep(2)
+        await human_click(page, sauvegarder)
+        await human_delay(1000, 2500)
         await page.screenshot(path=f"{account_label}_player_04_saved.png", full_page=True)
         await log_visible_buttons(page, f"{account_label} after Sauvegarder")
         log(f"{prefix}Second player saved successfully.")
@@ -612,7 +716,7 @@ async def select_second_player(page, email, account_label="sean"):
     return True, None
 
 
-# ── Per-court booking attempt ────────────────────────────────────────────────
+# ── Per-court booking attempt ───────────────────────────────────────────────
 
 async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
                           second_player_email, account_label="sean"):
@@ -647,7 +751,7 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
     await page.screenshot(path=f"{shot_prefix}_step1_loaded.png", full_page=True)
     await log_visible_buttons(page, f"{tag} step1")
 
-    # ── 2. Find and click Réserver ────────────────────────────────────────
+    # ── 2. Find and click Réserver ───────────────────────────────────────
     reserver = page.locator("button", has_text="Réserver").first
     try:
         await reserver.wait_for(state="visible", timeout=10_000)
@@ -657,9 +761,9 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
         await page.screenshot(path=f"{shot_prefix}_no_reserver.png", full_page=True)
         return False, None, False, "not_offered"
 
-    await reserver.click()
+    await human_click(page, reserver)
     await page.wait_for_load_state("networkidle")
-    await asyncio.sleep(2)
+    await human_delay(1000, 2500)
     await page.screenshot(path=f"{shot_prefix}_step2_after_reserver.png", full_page=True)
 
     # Verify the Réserver click succeeded: "Choisir un joueur" must appear.
@@ -681,17 +785,17 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
         await clear_cart(page, tag)
         return False, None, True, f"player_select_failed: {player_fail_reason}"
 
-    # ── 4. Caisse de sortie ───────────────────────────────────────────────
-    await asyncio.sleep(2)
+    # ─ 4. Caisse de sortie ───────────────────────────────────────────────
+    await human_delay(1000, 2500)
     await log_visible_buttons(page, f"{tag} pre-caisse")
     caisse = page.locator("button", has_text="Caisse de sortie").first
     try:
         await caisse.wait_for(state="visible", timeout=8_000)
-        # click() without force waits for Vue to re-enable the button before firing
+        # human_click waits for Vue to re-enable the button before firing
         log(f"  [{tag}] 'Caisse de sortie' found — waiting for it to be enabled…")
-        await caisse.click(timeout=10_000)
+        await human_click(page, caisse, timeout=10_000)
         await page.wait_for_load_state("networkidle")
-        await asyncio.sleep(2)
+        await human_delay(1000, 2500)
         await page.screenshot(path=f"{shot_prefix}_step4_after_caisse.png", full_page=True)
         await log_page_text(page, f"{tag} after-caisse")
     except Exception as e:
@@ -731,9 +835,9 @@ async def try_book_court(page, court_name, package_id, book_at_enc, target_date,
                     return False, None, True, "payment_required"
 
             log(f"  [{tag}] Clicking {btn_text!r}…")
-            await nav_btn.click()
+            await human_click(page, nav_btn)
             await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
+            await human_delay(1000, 2500)
         except Exception:
             log(f"  [{tag}] No more navigation buttons — end of wizard.")
             await page.screenshot(path=f"{shot_prefix}_confirmed.png", full_page=True)
@@ -881,8 +985,62 @@ async def run_account(browser, account, target_date):
     if override_email:
         player_email, player_name = override_email, override_name
 
-    context = await browser.new_context(storage_state=auth_file)
+    # Create browser context with realistic fingerprint
+    context = await browser.new_context(
+        storage_state=auth_file,
+        user_agent=random.choice(USER_AGENTS),
+        viewport=random.choice(VIEWPORT_SIZES),
+        locale="fr-CA",  # Match Montreal location
+        timezone_id="America/Montreal",
+    )
     page = await context.new_page()
+    
+    # Apply stealth patches
+    await stealth_async(page)
+    
+    # Add canvas and WebGL fingerprint spoofing
+    await page.add_init_script("""
+        // Canvas fingerprint spoofing - add tiny noise
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+            const result = originalToDataURL.call(this, type);
+            if (Math.random() > 0.5) {
+                return result.replace('data:image/png;base64,', 'data:image/png;base64,' + 'A');
+            }
+            return result;
+        };
+        
+        // WebGL vendor spoofing
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+            const result = getParameter.call(this, param);
+            if (param === 37445) return 'Intel Inc.';  // UNMASKED_VENDOR_WEBGL
+            if (param === 37446) return 'Intel Iris OpenGL Engine';  // UNMASKED_RENDERER_WEBGL
+            return result;
+        };
+        
+        // Track mouse position for realistic movement
+        window.mouseX = 0;
+        window.mouseY = 0;
+        document.addEventListener('mousemove', (e) => {
+            window.mouseX = e.clientX;
+            window.mouseY = e.clientY;
+        });
+        
+        // Add realistic localStorage
+        localStorage.setItem('last_visit', new Date().toISOString());
+        localStorage.setItem('view_count', String(Math.floor(Math.random() * 50) + 1));
+    """)
+    
+    # Add realistic cookies
+    await context.add_cookies([
+        {
+            "name": "session_pref",
+            "value": "language=fr",
+            "domain": "activitymessenger.com",
+            "path": "/",
+        }
+    ])
 
     try:
         # Verify the saved session is still a valid, logged-in session
