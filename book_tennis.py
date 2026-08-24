@@ -45,7 +45,7 @@ from email.mime.text import MIMEText
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
 from zoneinfo import ZoneInfo
 
 from local_config import GMAIL_ADDRESS, SHEET_SPREADSHEET_ID, KNOWN_PLAYERS, ACCOUNTS
@@ -878,6 +878,7 @@ async def run_account(browser, account, target_date):
     notify_email = account["notify_email"]
     is_owner     = account["is_owner"]
     account_priority = account.get("booking_priority") or BOOKING_PRIORITY
+    retry_total_secs = account.get("retry_total_secs", RETRY_TOTAL_SECS)
 
     # Failures are always also CC'd to Sean, even for other people's accounts,
     # so he has visibility without relying on each account owner to flag it.
@@ -996,7 +997,7 @@ async def run_account(browser, account, target_date):
     page = await context.new_page()
     
     # Apply stealth patches
-    await stealth_async(page)
+    await Stealth().apply_stealth_async(page)
     
     # Add canvas and WebGL fingerprint spoofing
     await page.add_init_script("""
@@ -1152,9 +1153,9 @@ async def run_account(browser, account, target_date):
             # Nothing anywhere responded this round — today's window likely
             # isn't open yet at all. Wait and try the whole list again.
             elapsed   = (datetime.now() - start_time).total_seconds()
-            remaining = RETRY_TOTAL_SECS - elapsed
+            remaining = retry_total_secs - elapsed
             if remaining <= 0:
-                log(f"[{label}] Retry window exhausted ({RETRY_TOTAL_SECS}s) — "
+                log(f"[{label}] Retry window exhausted ({retry_total_secs}s) — "
                     f"no option in the priority list ever showed a Réserver button.")
                 break
             wait = min(RETRY_INTERVAL_SECS, remaining)
@@ -1223,7 +1224,7 @@ async def run_account(browser, account, target_date):
                 )
                 reason = (
                     f"The booking window did not open within the retry window "
-                    f"({RETRY_TOTAL_SECS}s, {RETRY_TOTAL_SECS // RETRY_INTERVAL_SECS} attempts), "
+                    f"({retry_total_secs}s, {retry_total_secs // RETRY_INTERVAL_SECS} attempts), "
                     f"and no Réserver button appeared for any option on {target_date}. "
                     f"Tried: {tried_all}."
                 )
@@ -1233,7 +1234,7 @@ async def run_account(browser, account, target_date):
                     body=(
                         f"The booking window did not open in time on {target_date}.\n\n"
                         f"Retried {sentinel_name} {sentinel_label} every {RETRY_INTERVAL_SECS}s "
-                        f"for {RETRY_TOTAL_SECS}s starting at 9:30 PM, then checked every other "
+                        f"for {retry_total_secs}s starting at 9:30 PM, then checked every other "
                         f"option in the priority list — no Réserver button ever appeared for "
                         f"any of them: {tried_all}.\n\n"
                         f"You may need to book manually."
