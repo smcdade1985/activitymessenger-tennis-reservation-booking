@@ -602,7 +602,10 @@ async def check_session_valid(page, display_name, tag="session"):
         lambda: page.goto(f"{BASE_URL}/org/4866/client", wait_until="networkidle", timeout=NAV_TIMEOUT_MS),
         tag, "Session-check navigation",
     )
-    account_marker = page.locator(f"text={display_name}").first
+    # Restrict to visible matches: the page also renders the name in a hidden
+    # user-menu dropdown header that comes first in DOM order, and waiting for
+    # that one to become visible would misreport a live session as expired.
+    account_marker = page.locator(f"text={display_name} >> visible=true").first
     try:
         await account_marker.wait_for(state="visible", timeout=5_000)
         return True
